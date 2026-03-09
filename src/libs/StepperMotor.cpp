@@ -29,6 +29,7 @@ StepperMotor::StepperMotor(Pin &step, Pin &dir, Pin &en) : step_pin(step), dir_p
     acceleration= NAN;
     selected= true;
     extruder= false;
+    encoder_controlled= false;
 
     enable(false);
     unstep(); // initialize step pin

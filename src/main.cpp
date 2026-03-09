@@ -20,6 +20,7 @@
 #include "modules/tools/drillingcycles/Drillingcycles.h"
 #include "FilamentDetector.h"
 #include "MotorDriverControl.h"
+#include "modules/utils/encoder/Encoder.h"
 
 #include "modules/robot/Conveyor.h"
 #include "modules/utils/simpleshell/SimpleShell.h"
@@ -154,6 +155,7 @@ void init() {
     #ifndef NO_TOOLS_ENDSTOPS
     kernel->add_module( new(AHB0) Endstops() );
     #endif
+    kernel->add_module( new(AHB0) Encoder() );
     #ifndef NO_TOOLS_LASER
     kernel->add_module( new Laser() );
     #endif

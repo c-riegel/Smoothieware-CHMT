@@ -63,6 +63,7 @@ Conveyor::Conveyor()
     running = false;
     allow_fetch = false;
     flush= false;
+    held= false;
 }
 
 void Conveyor::on_module_loaded()
@@ -186,7 +187,7 @@ void Conveyor::check_queue(bool force)
     // we do this to allow an idle system to pre load the queue a bit so the first few blocks run smoothly.
     if(force || queue.is_full() || (us_ticker_read() - last_time_check) >= (queue_delay_time_ms * 1000)) {
         last_time_check = us_ticker_read(); // reset timeout
-        if(!flush) allow_fetch = true;
+        if(!flush && !held) allow_fetch = true;
         return;
     }
 }

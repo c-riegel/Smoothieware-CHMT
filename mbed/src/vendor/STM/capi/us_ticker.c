@@ -30,10 +30,12 @@
 #include "PeripheralNames.h"
 #include "stm32f4xx_hal.h"
 
-#define TIM_MST TIM2
+#define TIM_MST TIM3
 
 static TIM_HandleTypeDef TimMasterHandle;
 static int us_ticker_inited = 0;
+
+extern volatile uint16_t us_ticker_hi;
 
 void us_ticker_init(void)
 {
@@ -48,7 +50,12 @@ void us_ticker_init(void)
 uint32_t us_ticker_read()
 {
     if (!us_ticker_inited) us_ticker_init();
-    return TIM_MST->CNT;
+    uint16_t hi, cnt;
+    do {
+        hi = us_ticker_hi;
+        cnt = TIM_MST->CNT;
+    } while (hi != us_ticker_hi);
+    return ((uint32_t)hi << 16) | cnt;
 }
 
 void us_ticker_set_interrupt(timestamp_t timestamp)

@@ -35,6 +35,8 @@ public:
     void flush_queue(void);
     float get_current_feedrate() const { return current_feedrate; }
     void force_queue() { check_queue(true); }
+    void hold_queue() { held = true; allow_fetch = false; }
+    void release_queue() { held = false; }
 
     friend class Planner; // for queue
 
@@ -53,6 +55,7 @@ private:
         volatile bool running:1;
         volatile bool allow_fetch:1;
         bool flush:1;
+        bool held:1;
     };
 
 };

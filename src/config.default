@@ -15,8 +15,8 @@ default_feed_rate                            60000            # Default rate ( m
 default_seek_rate                            60000            # Default rate ( mm/minute ) for G0 moves
 
 # Arm solution configuration : Cartesian robot. Translates mm positions into stepper positions
-alpha_steps_per_mm                           31.94            # Steps per mm for alpha stepper # 1/8 stepping, 25T?, 1.8deg
-beta_steps_per_mm                            31.94            # Steps per mm for beta stepper
+alpha_steps_per_mm                           31.926           # Steps per mm for alpha stepper - calibrated with PCB ruler 2026-03-09
+beta_steps_per_mm                            31.926           # Steps per mm for beta stepper - calibrated with PCB ruler 2026-03-09
 gamma_steps_per_mm                           4.4444           # Steps per mm for gamma stepper
 
 # Planner module configuration : Look-ahead and acceleration configuration
@@ -66,18 +66,18 @@ gamma_max_rate                               125000.0         # mm/min CGR: I co
 gamma_acceleration                           31000.0          #        CGR: I couldn't get any faster in OpenPnP than with 30000
 
 # A axis: N1 rotation
-delta_steps_per_mm                           4.4444           # steps per degree: 160° per rev. @0.9° stepper = 400 steps/160° x 16 micros = 40
+delta_steps_per_mm                           4.4444           # steps per degree: 160ï¿½ per rev. @0.9ï¿½ stepper = 400 steps/160ï¿½ x 16 micros = 40
 delta_step_pin                               5.14             # Pin for delta stepper step signal
 delta_dir_pin                                5.9!             # Pin for delta stepper direction
 delta_en_pin                                 nc               # Pin for delta enable
 delta_current                                0.5              # Z stepper motor current
-a_axis_max_speed                             120000           # °/min
-delta_max_rate                               120000           # °/min
-delta_acceleration                           100000           # °/sec^2
+a_axis_max_speed                             120000           # ï¿½/min
+delta_max_rate                               120000           # ï¿½/min
+delta_acceleration                           100000           # ï¿½/sec^2
 delta_enable                                 true
 
 # B axis: N2 rotation
-epsilon_steps_per_mm                         4.4444           # steps per mm for epsilon stepper: 8mm spindle @ 1.8° stepper = 200 steps/8mm x 16 micros = 400
+epsilon_steps_per_mm                         4.4444           # steps per mm for epsilon stepper: 8mm spindle @ 1.8ï¿½ stepper = 200 steps/8mm x 16 micros = 400
 epsilon_step_pin                             5.15             # Pin for delta stepper step signal
 epsilon_dir_pin                              5.10!            # Pin for delta stepper direction
 epsilon_en_pin                               nc               # Pin for delta enable
@@ -268,4 +268,9 @@ temperature_control.v2sense.designator       V2
 currentcontrol_module_enable                 false            #
 
 return_error_on_unhandled_gcode              false            #
+
+# Encoder feedback (X/Y axis quadrature encoders)
+encoder_enable                               true
+encoder_x_counts_per_mm                      0                # set via M923 in OpenPnP AfterHoming script
+encoder_y_counts_per_mm                      0                # set via M923 in OpenPnP AfterHoming script
 

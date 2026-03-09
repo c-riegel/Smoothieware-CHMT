@@ -37,10 +37,17 @@
 
 TIM_HandleTypeDef TimMasterHandle;
 uint32_t PreviousVal = 0;
+volatile uint16_t us_ticker_hi = 0;
 
 void us_ticker_irq_handler(void);
 
 void timer_irq_handler(void) {
+    // Overflow for 16-bit to 32-bit extension of us_ticker
+    if (__HAL_TIM_GET_ITSTATUS(&TimMasterHandle, TIM_IT_UPDATE) == SET) {
+        __HAL_TIM_CLEAR_IT(&TimMasterHandle, TIM_IT_UPDATE);
+        us_ticker_hi++;
+    }
+
     // Channel 1 for mbed timeout
     if (__HAL_TIM_GET_ITSTATUS(&TimMasterHandle, TIM_IT_CC1) == SET) {
         __HAL_TIM_CLEAR_IT(&TimMasterHandle, TIM_IT_CC1);
@@ -75,8 +82,8 @@ HAL_StatusTypeDef HAL_InitTick (uint32_t TickPriority) {
   
     // Configure time base
     TimMasterHandle.Instance = TIM_MST;
-    TimMasterHandle.Init.Period            = 0xFFFFFFFF;
-    TimMasterHandle.Init.Prescaler         = (uint32_t)(SystemCoreClock / 2 / 1000000) - 1; // 1 µs tick
+    TimMasterHandle.Init.Period            = 0xFFFF;
+    TimMasterHandle.Init.Prescaler         = (uint32_t)(SystemCoreClock / 2 / 1000000) - 1; // 1 ï¿½s tick
     TimMasterHandle.Init.ClockDivision     = 0;
     TimMasterHandle.Init.CounterMode       = TIM_COUNTERMODE_UP;
     TimMasterHandle.Init.RepetitionCounter = 0;
@@ -93,6 +100,9 @@ HAL_StatusTypeDef HAL_InitTick (uint32_t TickPriority) {
     PreviousVal = __HAL_TIM_GetCounter(&TimMasterHandle);
     __HAL_TIM_SetCompare(&TimMasterHandle, TIM_CHANNEL_2, PreviousVal + HAL_TICK_DELAY);
     __HAL_TIM_ENABLE_IT(&TimMasterHandle, TIM_IT_CC2);
+
+    // Enable overflow interrupt for 16-bit to 32-bit us_ticker extension
+    __HAL_TIM_ENABLE_IT(&TimMasterHandle, TIM_IT_UPDATE);
 
 #if 0 // For DEBUG only
     __GPIOB_CLK_ENABLE();

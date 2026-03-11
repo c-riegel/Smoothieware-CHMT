@@ -42,21 +42,28 @@ volatile uint16_t us_ticker_hi = 0;
 void us_ticker_irq_handler(void);
 
 void timer_irq_handler(void) {
+    // Read SR and DIER once, then clear ALL handled flags in one write.
+    // This avoids the rc_w0 re-set bug where clearing one flag writes 1
+    // to other flag bits, which on some silicon re-sets those flags.
+    uint32_t sr = TIM_MST->SR;
+    uint32_t dier = TIM_MST->DIER;
+    uint32_t clear_mask = 0;
+
     // Overflow for 16-bit to 32-bit extension of us_ticker
-    if (__HAL_TIM_GET_ITSTATUS(&TimMasterHandle, TIM_IT_UPDATE) == SET) {
-        __HAL_TIM_CLEAR_IT(&TimMasterHandle, TIM_IT_UPDATE);
+    if ((sr & TIM_SR_UIF) && (dier & TIM_DIER_UIE)) {
         us_ticker_hi++;
+        clear_mask |= TIM_SR_UIF;
     }
 
     // Channel 1 for mbed timeout
-    if (__HAL_TIM_GET_ITSTATUS(&TimMasterHandle, TIM_IT_CC1) == SET) {
-        __HAL_TIM_CLEAR_IT(&TimMasterHandle, TIM_IT_CC1);
+    if ((sr & TIM_SR_CC1IF) && (dier & TIM_DIER_CC1IE)) {
     //    us_ticker_irq_handler();
+        clear_mask |= TIM_SR_CC1IF;
     }
 
     // Channel 2 for HAL tick
-    if (__HAL_TIM_GET_ITSTATUS(&TimMasterHandle, TIM_IT_CC2) == SET) {
-        __HAL_TIM_CLEAR_IT(&TimMasterHandle, TIM_IT_CC2);
+    if ((sr & TIM_SR_CC2IF) && (dier & TIM_DIER_CC2IE)) {
+        clear_mask |= TIM_SR_CC2IF;
         uint32_t val = __HAL_TIM_GetCounter(&TimMasterHandle);
         if ((val - PreviousVal) >= HAL_TICK_DELAY) {
             // Increment HAL variable
@@ -69,6 +76,9 @@ void timer_irq_handler(void) {
 #endif
         }
     }
+
+    // Clear all handled flags in one write — avoids rc_w0 re-set issue
+    TIM_MST->SR = ~clear_mask;
 }
 
 // Reconfigure the HAL tick using a standard timer instead of systick.

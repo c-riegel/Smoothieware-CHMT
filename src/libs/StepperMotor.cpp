@@ -30,6 +30,14 @@ StepperMotor::StepperMotor(Pin &step, Pin &dir, Pin &en) : step_pin(step), dir_p
     selected= true;
     extruder= false;
     encoder_controlled= false;
+    encoder_check_gte= false;
+    encoder_segment_mode= false;
+    encoder_cnt_reg= nullptr;
+    encoder_target= 0;
+    encoder_steps_per_tick= 0;
+    encoder_poll_hits= 0;
+    encoder_target_hit= false;
+    encoder_step_counter= 0;
 
     enable(false);
     unstep(); // initialize step pin

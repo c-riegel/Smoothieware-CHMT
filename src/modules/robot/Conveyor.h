@@ -33,6 +33,7 @@ public:
 
     void dump_queue(void);
     void flush_queue(void);
+    void discard_queue(void);
     float get_current_feedrate() const { return current_feedrate; }
     void force_queue() { check_queue(true); }
     void hold_queue() { held = true; allow_fetch = false; }

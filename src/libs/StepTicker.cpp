@@ -149,7 +149,47 @@ void StepTicker::step_tick (void)
 {
     //SET_STEPTICKER_DEBUG_PIN(running ? 1 : 0);
 
-    // if nothing has been setup we ignore the ticks
+    if(THEKERNEL->is_halted()) {
+        running= false;
+        current_tick = 0;
+        current_block= nullptr;
+        return;
+    }
+
+    // Encoder segment mode: step motors independently of planner blocks.
+    // OpenPnP is the motion planner — we just follow its commanded rates.
+    // This runs even when no block is active (queue held during segments).
+    {
+        bool any_segment_motor = false;
+        for (uint8_t m = 0; m < num_motors; m++) {
+            if(!motor[m]->is_encoder_segment_mode()) continue;
+            any_segment_motor = true;
+            if(!motor[m]->is_moving()) continue;
+
+            motor[m]->encoder_step_counter += motor[m]->encoder_steps_per_tick;
+            if(motor[m]->encoder_step_counter >= STEPTICKER_FPSCALE) {
+                motor[m]->encoder_step_counter -= STEPTICKER_FPSCALE;
+                motor[m]->step();
+                unstep.set(m);
+
+                // Polling fallback: catch target if OC missed
+                if(motor[m]->encoder_target_reached()) {
+                    motor[m]->encoder_poll_hits++;
+                    motor[m]->stop_moving();
+                    motor[m]->encoder_target_hit = true;
+                }
+            }
+        }
+        // If any motor is in segment mode, skip normal block processing
+        if(any_segment_motor) {
+            if(unstep.any()) {
+                TIM14->CR1 |= TIM_CR1_CEN;
+            }
+            return;
+        }
+    }
+
+    // Normal block-based stepping below (only when no encoder segments active)
     if(!running){
         // check if anything new available
         if(THECONVEYOR->get_next_block(&current_block)) { // returns false if no new block is available
@@ -158,13 +198,6 @@ void StepTicker::step_tick (void)
         }else{
             return;
         }
-    }
-
-    if(THEKERNEL->is_halted()) {
-        running= false;
-        current_tick = 0;
-        current_block= nullptr;
-        return;
     }
 
     bool still_moving= false;
@@ -193,8 +226,14 @@ void StepTicker::step_tick (void)
 
         // protect against rounding errors and such
         if(current_block->tick_info[m].steps_per_tick <= 0) {
-            current_block->tick_info[m].counter = STEPTICKER_FPSCALE; // we force completion this step by setting to 1.0
-            current_block->tick_info[m].steps_per_tick = 0;
+            if(motor[m]->is_encoder_controlled()) {
+                // Encoder mode: sustain plateau speed — encoder decides when done
+                current_block->tick_info[m].steps_per_tick = current_block->tick_info[m].plateau_rate;
+                current_block->tick_info[m].acceleration_change = 0;
+            } else {
+                current_block->tick_info[m].counter = STEPTICKER_FPSCALE; // we force completion this step by setting to 1.0
+                current_block->tick_info[m].steps_per_tick = 0;
+            }
         }
 
         current_block->tick_info[m].counter += current_block->tick_info[m].steps_per_tick;
@@ -208,10 +247,18 @@ void StepTicker::step_tick (void)
             // we stepped so schedule an unstep
             unstep.set(m);
 
-            if(!ismoving || (!motor[m]->is_encoder_controlled() && current_block->tick_info[m].step_count == current_block->tick_info[m].steps_to_move)) {
-                // done
-                current_block->tick_info[m].steps_to_move = 0;
-                motor[m]->stop_moving(); // let motor know it is no longer moving
+            if(motor[m]->is_encoder_controlled()) {
+                if(!ismoving || motor[m]->encoder_target_reached()) {
+                    if(ismoving) motor[m]->encoder_poll_hits++;
+                    current_block->tick_info[m].steps_to_move = 0;
+                    motor[m]->stop_moving();
+                    motor[m]->set_encoder_controlled(false);
+                }
+            } else {
+                if(!ismoving || current_block->tick_info[m].step_count == current_block->tick_info[m].steps_to_move) {
+                    current_block->tick_info[m].steps_to_move = 0;
+                    motor[m]->stop_moving(); // let motor know it is no longer moving
+                }
             }
         }
 

@@ -55,6 +55,24 @@ class StepperMotor  : public Module {
         void set_extruder(bool b) { extruder= b; }
         bool is_encoder_controlled() const { return encoder_controlled; }
         void set_encoder_controlled(bool b) { encoder_controlled= b; }
+        void set_encoder_check_gte(bool b) { encoder_check_gte= b; }
+        bool get_encoder_check_gte() const { return encoder_check_gte; }
+        bool is_encoder_segment_mode() const { return encoder_segment_mode; }
+        void set_encoder_segment_mode(bool b) { encoder_segment_mode= b; }
+
+        // Encoder position control (set by Encoder module, polled by step ticker ISR)
+        inline bool encoder_target_reached() const {
+            if(encoder_cnt_reg == nullptr) return false;
+            int32_t count = (int32_t)*encoder_cnt_reg;
+            return encoder_check_gte ? (count >= encoder_target) : (count <= encoder_target);
+        }
+
+        volatile uint32_t *encoder_cnt_reg;     // pointer to TIMx->CNT, nullptr if no encoder
+        volatile int32_t encoder_target;         // target encoder count for current move
+        volatile int64_t encoder_steps_per_tick; // constant stepping rate for encoder mode (2.62 fixed-point)
+        volatile uint32_t encoder_poll_hits;     // debug: times step ticker polling caught target
+        volatile bool encoder_target_hit;        // set by step ticker polling when target reached in segment mode
+        volatile int64_t encoder_step_counter;   // 2.62 fixed point accumulator for block-free stepping
 
         int32_t steps_to_target(float);
 
@@ -83,6 +101,8 @@ class StepperMotor  : public Module {
             bool selected:1;
             bool extruder:1;
             bool encoder_controlled:1;
+            bool encoder_check_gte:1;    // true: count >= target, false: count <= target
+            bool encoder_segment_mode:1; // true: OC ISR handles completion, step ticker hands off
         };
 };
 

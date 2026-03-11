@@ -11,8 +11,16 @@ class Gcode;
 struct EncoderSegment {
     int32_t x_target;
     int32_t y_target;
+    float feed_rate;    // mm/min at time of segment
+    uint32_t timeout_us; // precomputed timeout for remaining distance from this segment
+    uint32_t armed_at;     // us_ticker when this segment was actually armed (filled at runtime)
+    uint32_t completed_at; // us_ticker when this segment completed
+    int32_t x_enc_at_arm;  // encoder X count when armed
+    int32_t y_enc_at_arm;  // encoder Y count when armed
     bool has_x;
     bool has_y;
+    bool x_skipped;      // sub-resolution, skipped
+    bool y_skipped;
 };
 
 class Encoder : public Module {
@@ -45,17 +53,28 @@ class Encoder : public Module {
         void disarm_y();
         void arm_segment(int index);
         void try_advance_segment();
+        void precompute_segment_timeouts();
+        uint32_t compute_single_timeout_x();
+        uint32_t compute_single_timeout_y();
 
         float x_counts_per_mm;
         float y_counts_per_mm;
         float x_encoder_offset;
         float y_encoder_offset;
-        float x_move_distance_mm;
-        float y_move_distance_mm;
-        uint32_t x_arm_time_us;
-        uint32_t y_arm_time_us;
+        // Timeout state — arm_time and timeout_us are written together by arm_segment()
+        // and read together by on_idle(). Keeping them paired avoids cross-segment races.
+        volatile uint32_t x_arm_time_us;
+        volatile uint32_t x_timeout_us;
+        volatile uint32_t y_arm_time_us;
+        volatile uint32_t y_timeout_us;
         volatile bool x_move_armed;
         volatile bool y_move_armed;
+
+        // Non-segment single-move state (arm_x_target / arm_y_target)
+        float x_move_distance_mm;
+        float y_move_distance_mm;
+        float x_feed_rate_mmpm;
+        float y_feed_rate_mmpm;
         bool encoder_enabled;
 
         // Segment buffering (M920)
@@ -67,4 +86,19 @@ class Encoder : public Module {
         bool buffering;
         volatile bool x_segment_done;
         volatile bool y_segment_done;
+        volatile bool segments_complete;   // set by ISR when all segments done
+        volatile uint32_t segments_done_at; // us_ticker when last segment completed
+        volatile int last_reported_segment; // on_idle prints up to this point
+
+        // Debug counters (written from ISR, read/cleared from on_idle)
+        volatile uint32_t dbg_x_oc_count;      // OC ISR fired for X
+        volatile uint32_t dbg_y_oc_count;      // OC ISR fired for Y
+        volatile uint32_t dbg_x_poll_count;    // step ticker polling caught X target
+        volatile uint32_t dbg_y_poll_count;    // step ticker polling caught Y target
+        volatile int32_t  dbg_x_enc_at_done;   // encoder count when X block completed
+        volatile int32_t  dbg_y_enc_at_done;   // encoder count when Y block completed
+        volatile int32_t  dbg_x_target_at_done; // target when X block completed
+        volatile int32_t  dbg_y_target_at_done; // target when Y block completed
+        volatile bool     dbg_x_done_pending;   // new X completion to report
+        volatile bool     dbg_y_done_pending;   // new Y completion to report
 };

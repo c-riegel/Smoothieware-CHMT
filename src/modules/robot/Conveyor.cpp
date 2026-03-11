@@ -252,6 +252,23 @@ void Conveyor::flush_queue()
     flush= false;
 }
 
+// Discard all queued blocks without executing them.
+// Safe to call when the step ticker is not processing blocks
+// (e.g. encoder segment mode bypasses blocks entirely).
+void Conveyor::discard_queue()
+{
+    allow_fetch = false;
+    // Clear each block and advance tail pointers to discard all entries
+    while (!queue.is_empty()) {
+        Block* block = queue.tail_ref();
+        block->clear();
+        queue.consume_tail();
+    }
+    // Also sync the ISR pointer so get_next_block sees empty queue
+    queue.isr_tail_i = queue.head_i;
+    running = false;
+}
+
 // Debug function
 void Conveyor::dump_queue()
 {

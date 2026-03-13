@@ -160,8 +160,6 @@ void Encoder::arm_segment(int index)
     segments[index].armed_at = us_ticker_read();
     segments[index].x_enc_at_arm = get_x_count();
     segments[index].y_enc_at_arm = get_y_count();
-    segments[index].x_skipped = false;
-    segments[index].y_skipped = false;
 
     // Pre-set done flags for axes that don't move in this segment
     x_segment_done = !segments[index].has_x;
@@ -171,16 +169,14 @@ void Encoder::arm_segment(int index)
     x_stepper->encoder_target_hit = false;
     y_stepper->encoder_target_hit = false;
 
-    float tick_freq = THEKERNEL->step_ticker->get_frequency();
-
     if (segments[index].has_x) {
         int32_t current_x = get_x_count();
         bool gte = segments[index].x_target >= current_x;
         x_stepper->encoder_target = segments[index].x_target;
         x_stepper->set_encoder_check_gte(gte);
 
-        float x_steps_per_sec = (segments[index].feed_rate / 60.0f) * x_stepper->get_steps_per_mm();
-        x_stepper->encoder_steps_per_tick = (int64_t)round(((double)x_steps_per_sec / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+        // Use precomputed per-axis stepping rate (vector-decomposed at buffer time)
+        x_stepper->encoder_steps_per_tick = segments[index].x_steps_per_tick;
         x_stepper->encoder_step_counter = 0;
 
         // Set stepper direction from encoder direction.
@@ -211,8 +207,8 @@ void Encoder::arm_segment(int index)
         y_stepper->encoder_target = segments[index].y_target;
         y_stepper->set_encoder_check_gte(gte);
 
-        float y_steps_per_sec = (segments[index].feed_rate / 60.0f) * y_stepper->get_steps_per_mm();
-        y_stepper->encoder_steps_per_tick = (int64_t)round(((double)y_steps_per_sec / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+        // Use precomputed per-axis stepping rate (vector-decomposed at buffer time)
+        y_stepper->encoder_steps_per_tick = segments[index].y_steps_per_tick;
         y_stepper->encoder_step_counter = 0;
 
         // Same direction logic as X (see above)
@@ -276,16 +272,10 @@ Encoder::Encoder()
     segments_complete = false;
     segments_done_at = 0;
     last_reported_segment = -1;
+    pending_feed_rate = 0;
+    pending_acceleration = 0;
     dbg_x_oc_count = 0;
     dbg_y_oc_count = 0;
-    dbg_x_poll_count = 0;
-    dbg_y_poll_count = 0;
-    dbg_x_enc_at_done = 0;
-    dbg_y_enc_at_done = 0;
-    dbg_x_target_at_done = 0;
-    dbg_y_target_at_done = 0;
-    dbg_x_done_pending = false;
-    dbg_y_done_pending = false;
 }
 
 void Encoder::on_module_loaded()
@@ -539,15 +529,13 @@ void Encoder::on_idle(void *argument)
     if (segment_mode || segments_complete) {
         int cur = current_segment;
         while (last_reported_segment < cur - 1) {
-            // A completed segment: last_reported_segment+1 has completed_at set
             int i = last_reported_segment + 1;
             uint32_t dur = segments[i].completed_at - segments[i].armed_at;
-            THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld %c%c\n",
+            THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld F=%.0f\n",
                 i, dur,
                 segments[i].x_enc_at_arm, segments[i].x_target,
                 segments[i].y_enc_at_arm, segments[i].y_target,
-                segments[i].x_skipped ? 'X' : '.',
-                segments[i].y_skipped ? 'Y' : '.');
+                segments[i].feed_rate);
             last_reported_segment = i;
         }
     }
@@ -556,15 +544,23 @@ void Encoder::on_idle(void *argument)
         // Report the final segment
         int i = segment_count - 1;
         uint32_t dur = segments[i].completed_at - segments[i].armed_at;
-        THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld %c%c\n",
+        THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld F=%.0f\n",
             i, dur,
             segments[i].x_enc_at_arm, segments[i].x_target,
             segments[i].y_enc_at_arm, segments[i].y_target,
-            segments[i].x_skipped ? 'X' : '.',
-            segments[i].y_skipped ? 'Y' : '.');
+            segments[i].feed_rate);
         THEKERNEL->streams->printf("seg complete: total=%lu us\n",
             segments[i].completed_at - segments[0].armed_at);
         segments_complete = false;
+
+        // Sync Robot's internal position with actual encoder position.
+        // During segment execution we bypassed the planner, so Robot's
+        // machine_position is stale. Without this sync, the next non-segment
+        // G1 would compute its move from a wrong starting position.
+        float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
+        float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
+        float current_z = THEROBOT->get_axis_position(Z_AXIS);
+        THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
 
         // Discard planner blocks that were queued during buffering (we bypassed
         // them entirely — encoder segments drove the motors directly).
@@ -689,12 +685,38 @@ void Encoder::on_gcode_received(void *argument)
         if (buffering) {
             // M920 segment buffering: store target instead of arming
             if (segments_received < segment_count) {
+                // Capture F directly from G-code line (not Robot's modal state)
+                if (gcode->has_letter('F'))
+                    pending_feed_rate = gcode->get_value('F');
+
                 segments[segments_received].x_target = x_target;
                 segments[segments_received].y_target = y_target;
-                segments[segments_received].feed_rate = THEROBOT->get_feed_rate(); // mm/min
+                segments[segments_received].feed_rate = pending_feed_rate;
+                segments[segments_received].acceleration = pending_acceleration;
                 segments[segments_received].has_x = has_x;
                 segments[segments_received].has_y = has_y;
                 segments[segments_received].timeout_us = 0; // computed below once all segments arrive
+
+                // Precompute per-axis stepping rates from vector-decomposed feed rate.
+                // F is the hypotenuse velocity — decompose into per-axis speeds.
+                float tick_freq = THEKERNEL->step_ticker->get_frequency();
+                int32_t prev_x = (segments_received > 0) ? segments[segments_received - 1].x_target : get_x_count();
+                int32_t prev_y = (segments_received > 0) ? segments[segments_received - 1].y_target : get_y_count();
+                float dx_mm = has_x ? (float)(x_target - prev_x) / x_counts_per_mm : 0;
+                float dy_mm = has_y ? (float)(y_target - prev_y) / y_counts_per_mm : 0;
+                float dist = sqrtf(dx_mm * dx_mm + dy_mm * dy_mm);
+                float feed_mmps = pending_feed_rate / 60.0f; // mm/min -> mm/s
+
+                if (dist > 0.001f) {
+                    float x_speed = feed_mmps * fabsf(dx_mm) / dist;
+                    float y_speed = feed_mmps * fabsf(dy_mm) / dist;
+                    segments[segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+                    segments[segments_received].y_steps_per_tick = (int64_t)round(((double)(y_speed * y_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+                } else {
+                    segments[segments_received].x_steps_per_tick = 0;
+                    segments[segments_received].y_steps_per_tick = 0;
+                }
+
                 segments_received++;
 
                 if (segments_received == segment_count) {
@@ -729,6 +751,12 @@ void Encoder::on_gcode_received(void *argument)
 
     if (gcode->has_m) {
         switch (gcode->m) {
+            case 204: // capture acceleration during segment buffering
+                if (buffering && gcode->has_letter('S')) {
+                    pending_acceleration = gcode->get_value('S');
+                }
+                break;
+
             case 918: // report encoder positions
                 report_encoder_position(gcode);
                 break;
@@ -770,12 +798,15 @@ void Encoder::on_gcode_received(void *argument)
                     break;
                 }
                 if (x_counts_per_mm == 0 || y_counts_per_mm == 0) {
-                    gcode->stream->printf("error: encoder not calibrated\n");
+                    gcode->stream->printf("error: encoder not calibrated (x_cpm=%.4f y_cpm=%.4f)\n",
+                        x_counts_per_mm, y_counts_per_mm);
                     break;
                 }
                 segment_count = count;
                 segments_received = 0;
                 last_reported_segment = -1;
+                pending_feed_rate = THEROBOT->get_feed_rate(); // default from modal state
+                pending_acceleration = 0;
                 buffering = true;
                 THECONVEYOR->hold_queue();
                 THEKERNEL->streams->printf("M920: buf %d enc x=%ld y=%ld t=%lu\n",
@@ -805,6 +836,8 @@ void Encoder::on_gcode_received(void *argument)
                 break;
 
             case 923: { // set encoder counts per mm
+                THEKERNEL->streams->printf("M923: m=%u has_x=%d has_y=%d\n",
+                    gcode->m, (int)gcode->has_letter('X'), (int)gcode->has_letter('Y'));
                 if (gcode->has_letter('X')) x_counts_per_mm = gcode->get_value('X');
                 if (gcode->has_letter('Y')) y_counts_per_mm = gcode->get_value('Y');
                 // Synchronize: zero encoders and set offsets to current position
@@ -813,7 +846,7 @@ void Encoder::on_gcode_received(void *argument)
                 x_encoder_offset = THEROBOT->get_axis_position(X_AXIS);
                 y_encoder_offset = THEROBOT->get_axis_position(Y_AXIS);
                 char buf[40];
-                int n = snprintf(buf, sizeof(buf), "X:%.4f Y:%.4f", x_counts_per_mm, y_counts_per_mm);
+                int n = snprintf(buf, sizeof(buf), "CPM:%.4f,%.4f", x_counts_per_mm, y_counts_per_mm);
                 gcode->txt_after_ok.append(buf, n);
                 break;
             }

@@ -11,16 +11,17 @@ class Gcode;
 struct EncoderSegment {
     int32_t x_target;
     int32_t y_target;
-    float feed_rate;    // mm/min at time of segment
-    uint32_t timeout_us; // precomputed timeout for remaining distance from this segment
-    uint32_t armed_at;     // us_ticker when this segment was actually armed (filled at runtime)
-    uint32_t completed_at; // us_ticker when this segment completed
-    int32_t x_enc_at_arm;  // encoder X count when armed
-    int32_t y_enc_at_arm;  // encoder Y count when armed
+    float feed_rate;        // mm/min — overall segment feed rate (from G-code F parameter)
+    float acceleration;     // mm/s² — from M204 S parameter
+    int64_t x_steps_per_tick; // precomputed 2.62 fixed-point stepping rate for X axis
+    int64_t y_steps_per_tick; // precomputed 2.62 fixed-point stepping rate for Y axis
+    uint32_t timeout_us;    // precomputed timeout for remaining distance from this segment
+    uint32_t armed_at;      // us_ticker when this segment was actually armed (filled at runtime)
+    uint32_t completed_at;  // us_ticker when this segment completed
+    int32_t x_enc_at_arm;   // encoder X count when armed
+    int32_t y_enc_at_arm;   // encoder Y count when armed
     bool has_x;
     bool has_y;
-    bool x_skipped;      // sub-resolution, skipped
-    bool y_skipped;
 };
 
 class Encoder : public Module {
@@ -90,15 +91,11 @@ class Encoder : public Module {
         volatile uint32_t segments_done_at; // us_ticker when last segment completed
         volatile int last_reported_segment; // on_idle prints up to this point
 
+        // Buffering state for capturing M204/F values across G-code lines
+        float pending_feed_rate;     // last F value seen during buffering (mm/min)
+        float pending_acceleration;  // last M204 S value seen during buffering (mm/s²)
+
         // Debug counters (written from ISR, read/cleared from on_idle)
         volatile uint32_t dbg_x_oc_count;      // OC ISR fired for X
         volatile uint32_t dbg_y_oc_count;      // OC ISR fired for Y
-        volatile uint32_t dbg_x_poll_count;    // step ticker polling caught X target
-        volatile uint32_t dbg_y_poll_count;    // step ticker polling caught Y target
-        volatile int32_t  dbg_x_enc_at_done;   // encoder count when X block completed
-        volatile int32_t  dbg_y_enc_at_done;   // encoder count when Y block completed
-        volatile int32_t  dbg_x_target_at_done; // target when X block completed
-        volatile int32_t  dbg_y_target_at_done; // target when Y block completed
-        volatile bool     dbg_x_done_pending;   // new X completion to report
-        volatile bool     dbg_y_done_pending;   // new Y completion to report
 };

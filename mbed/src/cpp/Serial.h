@@ -53,9 +53,9 @@ public:
      *  @param rx Receive pin
      *
      *  @note
-     *    Either tx or rx may be specified as NC if unused
+     *    Either tx, rx, rts or cts may be specified as NC if unused
      */
-    Serial(PinName tx, PinName rx, const char *name=NULL);
+    Serial(PinName tx, PinName rx, PinName rts, PinName cts, const char *name=NULL);
 
     /** Set the baud rate of the serial port
      *
@@ -73,7 +73,10 @@ public:
 
     enum IrqType {
         RxIrq = 0,
-        TxIrq
+        TxIrq,
+        RxIdleIrq,
+        DmaHFIrq,
+        DmaTCIrq
     };
 
     /** Set the transmission format used by the Serial port
@@ -91,6 +94,8 @@ public:
      *    0 otherwise
      */
     int readable();
+    int get_dma_buffer_index();
+	int getrx();
 
     /** Determine if there is space available to write a character
      *
@@ -99,6 +104,9 @@ public:
      *    0 otherwise
      */
     int writeable();
+
+    /** Setup rx dma on our uart */
+    void dma_init( unsigned char* rx_buffer, int len );
 
     /** Attach a function to call whenever a serial interrupt is generated
      *
@@ -122,13 +130,14 @@ public:
     }
 
     static void _irq_handler(uint32_t id, SerialIrq irq_type);
+    void send_string(const char *s);
 
 protected:
     virtual int _getc();
     virtual int _putc(int c);
 
     serial_t        _serial;
-    FunctionPointer _irq[2];
+    FunctionPointer _irq[5];
 };
 
 } // namespace mbed

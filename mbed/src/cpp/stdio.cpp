@@ -74,7 +74,7 @@ extern serial_t stdio_uart;
 static void init_serial() {
 #if DEVICE_SERIAL
     if (stdio_uart_inited) return;
-    serial_init(&stdio_uart, STDIO_UART_TX, STDIO_UART_RX);
+    serial_init(&stdio_uart, STDIO_UART_TX, STDIO_UART_RX, NC, NC);
     serial_format(&stdio_uart, 8, ParityNone, 1);
     serial_baud(&stdio_uart, 9600);
 #endif

@@ -714,10 +714,13 @@ void Encoder::on_gcode_received(void *argument)
             // the gcode so the planner only creates blocks for Z/A/B/C/D.
             // If no X or Y, skip buffering — let it pass through entirely.
 
-            if ((has_x || has_y) && encoder_segments_received < encoder_segment_count) {
-                // Compute encoder targets from Robot's current position
-                int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
-                int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
+            if ((has_x || has_y) && encoder_segments_received < MAX_ENCODER_SEGMENTS) {
+                // Compute encoder targets from G-code commanded position (not Robot's
+                // current position, since Encoder runs before Robot in dispatch order).
+                int32_t x_target = has_x ? (int32_t)((gcode->get_value('X') - x_encoder_offset) * x_counts_per_mm) :
+                    (encoder_segments_received > 0 ? segments[encoder_segments_received - 1].x_target : get_x_count());
+                int32_t y_target = has_y ? (int32_t)((gcode->get_value('Y') - y_encoder_offset) * y_counts_per_mm) :
+                    (encoder_segments_received > 0 ? segments[encoder_segments_received - 1].y_target : get_y_count());
 
                 // Capture F directly from G-code line (not Robot's modal state)
                 if (gcode->has_letter('F'))
@@ -865,11 +868,14 @@ void Encoder::on_gcode_received(void *argument)
                 }
 
                 // Position sync: ensure Robot's position matches encoder reality
-                // before computing any targets. Critical after legacy planner moves.
-                float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
-                float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
-                float current_z = THEROBOT->get_axis_position(Z_AXIS);
-                THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
+                // before computing any targets. Only sync when conveyor is idle —
+                // syncing during an active planner move corrupts the in-flight block.
+                if (THECONVEYOR->is_idle()) {
+                    float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
+                    float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
+                    float current_z = THEROBOT->get_axis_position(Z_AXIS);
+                    THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
+                }
 
                 segment_count = count;
                 segments_received = 0;

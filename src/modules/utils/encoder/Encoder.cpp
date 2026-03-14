@@ -644,7 +644,8 @@ void Encoder::on_idle(void *argument)
             uint32_t elapsed_us = us_ticker_read() - x_arm_time_us;
             uint32_t timeout = compute_single_timeout_x();
             if (elapsed_us > timeout) {
-                THEKERNEL->streams->printf("error: encoder X move timeout (single)\n");
+                THEKERNEL->streams->printf("error: encoder X move timeout (single) enc=%ld target=%ld delta=%.4fmm elapsed=%luus\n",
+                    get_x_count(), x_stepper->encoder_target, (float)(x_stepper->encoder_target - get_x_count()) / x_counts_per_mm, elapsed_us);
                 disarm_x();
                 THEKERNEL->call_event(ON_HALT, nullptr);
             }
@@ -658,7 +659,8 @@ void Encoder::on_idle(void *argument)
             uint32_t elapsed_us = us_ticker_read() - y_arm_time_us;
             uint32_t timeout = compute_single_timeout_y();
             if (elapsed_us > timeout) {
-                THEKERNEL->streams->printf("error: encoder Y move timeout (single)\n");
+                THEKERNEL->streams->printf("error: encoder Y move timeout (single) enc=%ld target=%ld delta=%.4fmm elapsed=%luus\n",
+                    get_y_count(), y_stepper->encoder_target, (float)(y_stepper->encoder_target - get_y_count()) / y_counts_per_mm, elapsed_us);
                 disarm_y();
                 THEKERNEL->call_event(ON_HALT, nullptr);
             }
@@ -789,10 +791,15 @@ void Encoder::on_gcode_received(void *argument)
             // Normal single-move mode (not buffering)
             int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
             int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
-            if (has_x) arm_x_target(x_target);
-            if (has_y) arm_y_target(y_target);
+            // Only arm encoder target if the move is at least 2 encoder counts.
+            // Sub-count moves (< 0.025mm) can't be detected by the encoder and
+            // would cause a timeout.
+            if (has_x && abs(x_target - get_x_count()) >= 2) arm_x_target(x_target);
+            if (has_y && abs(y_target - get_y_count()) >= 2) arm_y_target(y_target);
         }
-        return;
+        // DON'T return — let G1 pass through to Robot/Planner for stepping.
+        // In buffering mode, X/Y are stripped so planner handles Z/A/B/C/D only.
+        // In single-move mode, planner handles all axes alongside encoder detection.
     }
 
     if (gcode->has_m) {

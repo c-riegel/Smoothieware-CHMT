@@ -81,8 +81,10 @@ class Encoder : public Module {
         // Segment buffering (M920)
         EncoderSegment segments[MAX_ENCODER_SEGMENTS];
         volatile int current_segment;
-        int segment_count;
-        int segments_received;
+        int segment_count;           // total G1 commands expected (from M920 S<N>)
+        int segments_received;       // total G1 commands received so far
+        int encoder_segment_count;   // how many had X/Y (encoder-buffered)
+        int encoder_segments_received; // how many X/Y segments buffered so far
         volatile bool segment_mode;
         bool buffering;
         volatile bool x_segment_done;

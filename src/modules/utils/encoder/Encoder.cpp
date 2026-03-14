@@ -17,6 +17,31 @@
 #include "mbed.h" // for us_ticker_read()
 #include <math.h>
 
+// Strip a letter parameter and its numeric value from a G-code command string in-place.
+// E.g. strip_gcode_letter(cmd, 'X') turns "G1X265.174Y73.707F600" into "G1Y73.707F600".
+static void strip_gcode_letter(char* cmd, char letter)
+{
+    char* read = cmd;
+    char* write = cmd;
+    while (*read) {
+        if (*read == letter) {
+            read++; // skip the letter
+            // skip optional minus sign
+            if (*read == '-') read++;
+            // skip digits
+            while (*read >= '0' && *read <= '9') read++;
+            // skip optional decimal point + digits
+            if (*read == '.') {
+                read++;
+                while (*read >= '0' && *read <= '9') read++;
+            }
+        } else {
+            *write++ = *read++;
+        }
+    }
+    *write = '\0';
+}
+
 #define encoder_enable_checksum          CHECKSUM("encoder_enable")
 #define encoder_x_counts_per_mm_checksum CHECKSUM("encoder_x_counts_per_mm")
 #define encoder_y_counts_per_mm_checksum CHECKSUM("encoder_y_counts_per_mm")
@@ -103,7 +128,7 @@ void Encoder::try_advance_segment()
     if (y_stepper) y_stepper->stop_moving();
 
     int next = current_segment + 1;
-    if (next < segment_count) {
+    if (next < encoder_segment_count) {
         current_segment = next;
         arm_segment(next);
     } else {
@@ -129,12 +154,12 @@ void Encoder::precompute_segment_timeouts()
     // Called once after all segments are received, before any movement.
     // For each segment, compute the timeout based on remaining distance to the
     // final target and the segment's feed rate.
-    int32_t final_x = segments[segment_count - 1].x_target;
-    int32_t final_y = segments[segment_count - 1].y_target;
+    int32_t final_x = segments[encoder_segment_count - 1].x_target;
+    int32_t final_y = segments[encoder_segment_count - 1].y_target;
     int32_t start_x = get_x_count();
     int32_t start_y = get_y_count();
 
-    for (int i = 0; i < segment_count; i++) {
+    for (int i = 0; i < encoder_segment_count; i++) {
         // Remaining distance from this segment's starting point to the final target.
         // For segment 0, use current encoder position. For later segments, use
         // the previous segment's target as the starting point.
@@ -266,6 +291,8 @@ Encoder::Encoder()
     buffering = false;
     segment_count = 0;
     segments_received = 0;
+    encoder_segment_count = 0;
+    encoder_segments_received = 0;
     current_segment = 0;
     x_segment_done = false;
     y_segment_done = false;
@@ -301,7 +328,14 @@ void Encoder::on_module_loaded()
     init_encoders();
     init_output_compare();
 
+    // Encoder must process ON_GCODE_RECEIVED BEFORE Robot so it can strip
+    // X/Y from G1 commands during segment buffering. Robot registered first
+    // (in Kernel init), so we unregister it, register Encoder, then re-register
+    // Robot — putting Encoder ahead in the dispatch order.
+    THEKERNEL->unregister_for_event(ON_GCODE_RECEIVED, THEKERNEL->robot);
     this->register_for_event(ON_GCODE_RECEIVED);
+    THEKERNEL->register_for_event(ON_GCODE_RECEIVED, THEKERNEL->robot);
+
     this->register_for_event(ON_IDLE);
     this->register_for_event(ON_HALT);
 }
@@ -542,7 +576,7 @@ void Encoder::on_idle(void *argument)
 
     if (segments_complete) {
         // Report the final segment
-        int i = segment_count - 1;
+        int i = encoder_segment_count - 1;
         uint32_t dur = segments[i].completed_at - segments[i].armed_at;
         THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld F=%.0f\n",
             i, dur,
@@ -554,19 +588,13 @@ void Encoder::on_idle(void *argument)
         segments_complete = false;
 
         // Sync Robot's internal position with actual encoder position.
-        // During segment execution we bypassed the planner, so Robot's
-        // machine_position is stale. Without this sync, the next non-segment
-        // G1 would compute its move from a wrong starting position.
+        // The planner may have been processing Z/A/B/C/D blocks concurrently,
+        // so only sync X/Y from encoders, preserve Z from planner.
         float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
         float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
         float current_z = THEROBOT->get_axis_position(Z_AXIS);
         THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
-
-        // Discard planner blocks that were queued during buffering (we bypassed
-        // them entirely — encoder segments drove the motors directly).
-        // Release the held queue so the conveyor resumes normal operation.
-        THECONVEYOR->discard_queue();
-        THECONVEYOR->release_queue();
+        // Queue is NOT held in the blending architecture — no release needed.
     }
 
     // Periodic status: during segment execution or armed single moves (not during buffering — serial conflict)
@@ -598,12 +626,11 @@ void Encoder::on_idle(void *argument)
             uint32_t elapsed = now - segments[0].armed_at;
             if (elapsed > 10000000) { // 10 seconds
                 THEKERNEL->streams->printf("error: segment safety timeout 10s, seg=%d/%d enc x=%ld y=%ld\n",
-                    current_segment, segment_count, get_x_count(), get_y_count());
+                    current_segment, encoder_segment_count, get_x_count(), get_y_count());
                 disarm_x();
                 disarm_y();
                 segment_mode = false;
                 buffering = false;
-                THECONVEYOR->release_queue();
                 THEKERNEL->call_event(ON_HALT, nullptr);
             }
         }
@@ -648,7 +675,6 @@ void Encoder::on_halt(void *argument)
         if (segment_mode || buffering) {
             segment_mode = false;
             buffering = false;
-            THECONVEYOR->release_queue();
         }
     }
 }
@@ -677,72 +703,92 @@ void Encoder::on_gcode_received(void *argument)
         // Encoder-driven position control: only when calibrated
         if (x_counts_per_mm == 0 || y_counts_per_mm == 0) return;
 
-        int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
-        int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
         bool has_x = gcode->has_letter('X');
         bool has_y = gcode->has_letter('Y');
 
         if (buffering) {
-            // M920 segment buffering: store target instead of arming
-            if (segments_received < segment_count) {
+            // M920 segment buffering mode.
+            // If this G1 has X or Y, buffer encoder data and strip X/Y from
+            // the gcode so the planner only creates blocks for Z/A/B/C/D.
+            // If no X or Y, skip buffering — let it pass through entirely.
+
+            if ((has_x || has_y) && encoder_segments_received < encoder_segment_count) {
+                // Compute encoder targets from Robot's current position
+                int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
+                int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
+
                 // Capture F directly from G-code line (not Robot's modal state)
                 if (gcode->has_letter('F'))
                     pending_feed_rate = gcode->get_value('F');
 
-                segments[segments_received].x_target = x_target;
-                segments[segments_received].y_target = y_target;
-                segments[segments_received].feed_rate = pending_feed_rate;
-                segments[segments_received].acceleration = pending_acceleration;
-                segments[segments_received].has_x = has_x;
-                segments[segments_received].has_y = has_y;
-                segments[segments_received].timeout_us = 0; // computed below once all segments arrive
+                segments[encoder_segments_received].x_target = x_target;
+                segments[encoder_segments_received].y_target = y_target;
+                segments[encoder_segments_received].feed_rate = pending_feed_rate;
+                segments[encoder_segments_received].acceleration = pending_acceleration;
+                segments[encoder_segments_received].has_x = has_x;
+                segments[encoder_segments_received].has_y = has_y;
+                segments[encoder_segments_received].timeout_us = 0;
 
                 // Precompute per-axis stepping rates from vector-decomposed feed rate.
-                // F is the hypotenuse velocity — decompose into per-axis speeds.
                 float tick_freq = THEKERNEL->step_ticker->get_frequency();
-                int32_t prev_x = (segments_received > 0) ? segments[segments_received - 1].x_target : get_x_count();
-                int32_t prev_y = (segments_received > 0) ? segments[segments_received - 1].y_target : get_y_count();
+                int32_t prev_x = (encoder_segments_received > 0) ? segments[encoder_segments_received - 1].x_target : get_x_count();
+                int32_t prev_y = (encoder_segments_received > 0) ? segments[encoder_segments_received - 1].y_target : get_y_count();
                 float dx_mm = has_x ? (float)(x_target - prev_x) / x_counts_per_mm : 0;
                 float dy_mm = has_y ? (float)(y_target - prev_y) / y_counts_per_mm : 0;
                 float dist = sqrtf(dx_mm * dx_mm + dy_mm * dy_mm);
-                float feed_mmps = pending_feed_rate / 60.0f; // mm/min -> mm/s
+                float feed_mmps = pending_feed_rate / 60.0f;
 
                 if (dist > 0.001f) {
                     float x_speed = feed_mmps * fabsf(dx_mm) / dist;
                     float y_speed = feed_mmps * fabsf(dy_mm) / dist;
-                    segments[segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
-                    segments[segments_received].y_steps_per_tick = (int64_t)round(((double)(y_speed * y_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+                    segments[encoder_segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+                    segments[encoder_segments_received].y_steps_per_tick = (int64_t)round(((double)(y_speed * y_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
                 } else {
-                    segments[segments_received].x_steps_per_tick = 0;
-                    segments[segments_received].y_steps_per_tick = 0;
+                    segments[encoder_segments_received].x_steps_per_tick = 0;
+                    segments[encoder_segments_received].y_steps_per_tick = 0;
                 }
 
-                segments_received++;
+                encoder_segments_received++;
 
-                if (segments_received == segment_count) {
-                    // All segments received — precompute timeouts before any movement starts
+                // Strip X and Y from the gcode command so Robot/Planner only
+                // processes Z/A/B/C/D axes. This prevents dual control of X/Y.
+                strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'X');
+                strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'Y');
+            }
+
+            segments_received++;
+
+            if (segments_received == segment_count) {
+                buffering = false;
+
+                if (encoder_segments_received > 0) {
+                    // We have encoder segments — precompute timeouts and start
+                    encoder_segment_count = encoder_segments_received;
                     precompute_segment_timeouts();
 
-                    // Summary: first and last segment targets (full dump via M925)
-                    int last = segment_count - 1;
+                    int last = encoder_segment_count - 1;
                     THEKERNEL->streams->printf("seg recv: %d enc x=%ld y=%ld s0:xt=%ld,yt=%ld s%d:xt=%ld,yt=%ld t=%lu\n",
-                        segment_count, get_x_count(), get_y_count(),
+                        encoder_segment_count, get_x_count(), get_y_count(),
                         segments[0].x_target, segments[0].y_target,
                         last, segments[last].x_target, segments[last].y_target,
                         us_ticker_read());
 
-                    // Start execution — queue stays held so planner blocks
-                    // don't interfere. We step independently via encoder_segment_mode
-                    // in the step ticker. Queue is flushed when segments complete.
-                    buffering = false;
                     segment_mode = true;
                     current_segment = 0;
                     THEKERNEL->streams->printf("arm seg 0 t=%lu\n", us_ticker_read());
                     arm_segment(0);
                 }
+                // else: all segments were Z/A/B/C/D only — no encoder work needed.
+                // Planner handles everything via the stripped G1 commands.
             }
+
+            // DON'T return — let the (stripped) G1 pass through to Robot/Planner
+            // so Z/A/B/C/D axes are handled by the normal planner.
+
         } else if (!segment_mode) {
-            // Normal single-move mode
+            // Normal single-move mode (not buffering)
+            int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
+            int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
             if (has_x) arm_x_target(x_target);
             if (has_y) arm_y_target(y_target);
         }
@@ -751,6 +797,14 @@ void Encoder::on_gcode_received(void *argument)
 
     if (gcode->has_m) {
         switch (gcode->m) {
+            case 400: // wait for moves — also wait for encoder segments
+                if (segment_mode) {
+                    while (segment_mode && !THEKERNEL->is_halted()) {
+                        THEKERNEL->call_event(ON_IDLE, nullptr);
+                    }
+                }
+                break; // let M400 pass through to Conveyor handler too
+
             case 204: // capture acceleration during segment buffering
                 if (buffering && gcode->has_letter('S')) {
                     pending_acceleration = gcode->get_value('S');
@@ -802,13 +856,23 @@ void Encoder::on_gcode_received(void *argument)
                         x_counts_per_mm, y_counts_per_mm);
                     break;
                 }
+
+                // Position sync: ensure Robot's position matches encoder reality
+                // before computing any targets. Critical after legacy planner moves.
+                float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
+                float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
+                float current_z = THEROBOT->get_axis_position(Z_AXIS);
+                THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
+
                 segment_count = count;
                 segments_received = 0;
+                encoder_segments_received = 0;
+                encoder_segment_count = 0;
                 last_reported_segment = -1;
-                pending_feed_rate = THEROBOT->get_feed_rate(); // default from modal state
+                pending_feed_rate = THEROBOT->get_feed_rate();
                 pending_acceleration = 0;
                 buffering = true;
-                THECONVEYOR->hold_queue();
+                // DO NOT hold queue — Z/A/B/C/D planner blocks must flow through
                 THEKERNEL->streams->printf("M920: buf %d enc x=%ld y=%ld t=%lu\n",
                     count, get_x_count(), get_y_count(), us_ticker_read());
                 break;

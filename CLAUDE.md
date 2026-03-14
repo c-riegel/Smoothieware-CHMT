@@ -77,6 +77,28 @@ has custom features for this firmware:
 - X and Y axes have encoders; encoder data drives all position logic
 - X encoder: PA_15 + PB_3 on TIM2, Y encoder: PA_0 + PA_1 on TIM5
 
+## Serial Ports
+
+Two serial consoles are registered in Kernel.cpp (line 131-132):
+
+| Port | Pins | USART | Purpose | PC Device |
+|------|------|-------|---------|-----------|
+| Primary | PA_9 (TX), PA_10 (RX) | USART1 | OpenPnP control channel | /dev/ttyUSB0 (RS422 via StarTech ICUSB422IS) |
+| Debug | PD_5 (TX), PD_6 (RX) | USART2 | Debug monitor | /dev/ttyUSB1 (RS232 via USB cable from machine) |
+
+Both ports run at the same baud rate (115200, configured via `uart0.baud_rate` in config).
+Both receive ALL firmware output via the streams pool (boot messages, ok responses,
+encoder segment reports, error messages, etc.).
+
+**Usage:** Monitor the debug port while OpenPnP runs on the control port:
+```
+stty -F /dev/ttyUSB1 115200 cs8 -cstopb -parenb raw -echo
+cat /dev/ttyUSB1 | tee ~/Documents/git/debug_uart.txt
+```
+
+This gives a clean copy of all firmware output without serial contention from OpenPnP's
+command traffic on the control channel.
+
 ## Firmware M-code Reference
 
 | M-code | Purpose |

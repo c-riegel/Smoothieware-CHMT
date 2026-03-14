@@ -722,9 +722,13 @@ void Encoder::on_gcode_received(void *argument)
                 int32_t y_target = has_y ? (int32_t)((gcode->get_value('Y') - y_encoder_offset) * y_counts_per_mm) :
                     (encoder_segments_received > 0 ? segments[encoder_segments_received - 1].y_target : get_y_count());
 
+                // DEBUG: show raw gcode values and computed targets
+                THEKERNEL->streams->printf("ebuf: gX=%.4f gY=%.4f off=%.4f xt=%ld yt=%ld cmd=%s\n",
+                    has_x ? gcode->get_value('X') : 0, has_y ? gcode->get_value('Y') : 0,
+                    x_encoder_offset, x_target, y_target, gcode->get_command());
+
                 // Per-axis minimum delta check: if the move on an axis is smaller
-                // than MIN_ENCODER_DELTA counts, let the planner handle that axis
-                // instead of encoder control (too small to reliably detect).
+                // than MIN_ENCODER_DELTA counts, don't encoder-control that axis.
                 int32_t prev_x = (encoder_segments_received > 0) ? segments[encoder_segments_received - 1].x_target : get_x_count();
                 int32_t prev_y = (encoder_segments_received > 0) ? segments[encoder_segments_received - 1].y_target : get_y_count();
                 bool enc_x = has_x && (abs(x_target - prev_x) >= MIN_ENCODER_DELTA);
@@ -761,12 +765,13 @@ void Encoder::on_gcode_received(void *argument)
                     }
 
                     encoder_segments_received++;
-
-                    // Strip only the axes we're encoder-controlling from the gcode
-                    // so the planner handles the rest.
-                    if (enc_x) strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'X');
-                    if (enc_y) strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'Y');
                 }
+
+                // ALWAYS strip X/Y during M920 buffering — the planner must never
+                // create X/Y steps for encoder-backed axes, regardless of whether
+                // the segment was above or below the encoder threshold.
+                if (has_x) strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'X');
+                if (has_y) strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'Y');
                 // else: both axes below threshold — let planner handle entirely
             }
 

@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define MAX_ENCODER_SEGMENTS 128
+#define MIN_ENCODER_DELTA 10       // minimum encoder counts per axis to arm encoder target
 
 class StreamOutput;
 class Gcode;

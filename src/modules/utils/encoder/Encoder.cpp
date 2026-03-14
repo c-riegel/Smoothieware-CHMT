@@ -722,43 +722,52 @@ void Encoder::on_gcode_received(void *argument)
                 int32_t y_target = has_y ? (int32_t)((gcode->get_value('Y') - y_encoder_offset) * y_counts_per_mm) :
                     (encoder_segments_received > 0 ? segments[encoder_segments_received - 1].y_target : get_y_count());
 
-                // Capture F directly from G-code line (not Robot's modal state)
-                if (gcode->has_letter('F'))
-                    pending_feed_rate = gcode->get_value('F');
-
-                segments[encoder_segments_received].x_target = x_target;
-                segments[encoder_segments_received].y_target = y_target;
-                segments[encoder_segments_received].feed_rate = pending_feed_rate;
-                segments[encoder_segments_received].acceleration = pending_acceleration;
-                segments[encoder_segments_received].has_x = has_x;
-                segments[encoder_segments_received].has_y = has_y;
-                segments[encoder_segments_received].timeout_us = 0;
-
-                // Precompute per-axis stepping rates from vector-decomposed feed rate.
-                float tick_freq = THEKERNEL->step_ticker->get_frequency();
+                // Per-axis minimum delta check: if the move on an axis is smaller
+                // than MIN_ENCODER_DELTA counts, let the planner handle that axis
+                // instead of encoder control (too small to reliably detect).
                 int32_t prev_x = (encoder_segments_received > 0) ? segments[encoder_segments_received - 1].x_target : get_x_count();
                 int32_t prev_y = (encoder_segments_received > 0) ? segments[encoder_segments_received - 1].y_target : get_y_count();
-                float dx_mm = has_x ? (float)(x_target - prev_x) / x_counts_per_mm : 0;
-                float dy_mm = has_y ? (float)(y_target - prev_y) / y_counts_per_mm : 0;
-                float dist = sqrtf(dx_mm * dx_mm + dy_mm * dy_mm);
-                float feed_mmps = pending_feed_rate / 60.0f;
+                bool enc_x = has_x && (abs(x_target - prev_x) >= MIN_ENCODER_DELTA);
+                bool enc_y = has_y && (abs(y_target - prev_y) >= MIN_ENCODER_DELTA);
 
-                if (dist > 0.001f) {
-                    float x_speed = feed_mmps * fabsf(dx_mm) / dist;
-                    float y_speed = feed_mmps * fabsf(dy_mm) / dist;
-                    segments[encoder_segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
-                    segments[encoder_segments_received].y_steps_per_tick = (int64_t)round(((double)(y_speed * y_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
-                } else {
-                    segments[encoder_segments_received].x_steps_per_tick = 0;
-                    segments[encoder_segments_received].y_steps_per_tick = 0;
+                if (enc_x || enc_y) {
+                    // Capture F directly from G-code line (not Robot's modal state)
+                    if (gcode->has_letter('F'))
+                        pending_feed_rate = gcode->get_value('F');
+
+                    segments[encoder_segments_received].x_target = x_target;
+                    segments[encoder_segments_received].y_target = y_target;
+                    segments[encoder_segments_received].feed_rate = pending_feed_rate;
+                    segments[encoder_segments_received].acceleration = pending_acceleration;
+                    segments[encoder_segments_received].has_x = enc_x;
+                    segments[encoder_segments_received].has_y = enc_y;
+                    segments[encoder_segments_received].timeout_us = 0;
+
+                    // Precompute per-axis stepping rates from vector-decomposed feed rate.
+                    float tick_freq = THEKERNEL->step_ticker->get_frequency();
+                    float dx_mm = enc_x ? (float)(x_target - prev_x) / x_counts_per_mm : 0;
+                    float dy_mm = enc_y ? (float)(y_target - prev_y) / y_counts_per_mm : 0;
+                    float dist = sqrtf(dx_mm * dx_mm + dy_mm * dy_mm);
+                    float feed_mmps = pending_feed_rate / 60.0f;
+
+                    if (dist > 0.001f) {
+                        float x_speed = feed_mmps * fabsf(dx_mm) / dist;
+                        float y_speed = feed_mmps * fabsf(dy_mm) / dist;
+                        segments[encoder_segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+                        segments[encoder_segments_received].y_steps_per_tick = (int64_t)round(((double)(y_speed * y_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
+                    } else {
+                        segments[encoder_segments_received].x_steps_per_tick = 0;
+                        segments[encoder_segments_received].y_steps_per_tick = 0;
+                    }
+
+                    encoder_segments_received++;
+
+                    // Strip only the axes we're encoder-controlling from the gcode
+                    // so the planner handles the rest.
+                    if (enc_x) strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'X');
+                    if (enc_y) strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'Y');
                 }
-
-                encoder_segments_received++;
-
-                // Strip X and Y from the gcode command so Robot/Planner only
-                // processes Z/A/B/C/D axes. This prevents dual control of X/Y.
-                strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'X');
-                strip_gcode_letter(const_cast<char*>(gcode->get_command()), 'Y');
+                // else: both axes below threshold — let planner handle entirely
             }
 
             segments_received++;
@@ -794,11 +803,10 @@ void Encoder::on_gcode_received(void *argument)
             // Normal single-move mode (not buffering)
             int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
             int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
-            // Only arm encoder target if the move is at least 2 encoder counts.
-            // Sub-count moves (< 0.025mm) can't be detected by the encoder and
-            // would cause a timeout.
-            if (has_x && abs(x_target - get_x_count()) >= 2) arm_x_target(x_target);
-            if (has_y && abs(y_target - get_y_count()) >= 2) arm_y_target(y_target);
+            // Only arm encoder target if the move exceeds the minimum delta.
+            // Smaller moves can't be reliably detected and would cause a timeout.
+            if (has_x && abs(x_target - get_x_count()) >= MIN_ENCODER_DELTA) arm_x_target(x_target);
+            if (has_y && abs(y_target - get_y_count()) >= MIN_ENCODER_DELTA) arm_y_target(y_target);
         }
         // DON'T return — let G1 pass through to Robot/Planner for stepping.
         // In buffering mode, X/Y are stripped so planner handles Z/A/B/C/D only.

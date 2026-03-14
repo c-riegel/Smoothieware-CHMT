@@ -27,6 +27,37 @@
 #include "stm32f4xx.h"
 #include "version.h"
 
+// CRC16 for serial command verification (CRC-CCITT variant)
+static uint16_t crc16(const uint8_t* buffer, uint16_t length)
+{
+    uint16_t crc = 0xFFFF;
+    for (uint16_t i = 0; i < length; i++) {
+        crc = (uint16_t)((uint8_t)(crc >> 8) | (uint16_t)(crc << 8));
+        crc ^= buffer[i];
+        crc ^= (uint8_t)(crc & 0xFF) >> 4;
+        crc ^= (uint16_t)((uint16_t)(crc << 8) << 4);
+        crc ^= (uint16_t)((uint16_t)((crc & 0xFF) << 4) << 1);
+    }
+    return crc;
+}
+
+// Parse 4 hex chars into uint16_t. Returns false if any char is not valid hex.
+static bool parse_hex16(const char* s, uint16_t* out)
+{
+    uint16_t val = 0;
+    for (int i = 0; i < 4; i++) {
+        char c = s[i];
+        uint8_t nibble;
+        if (c >= '0' && c <= '9') nibble = c - '0';
+        else if (c >= 'A' && c <= 'F') nibble = c - 'A' + 10;
+        else if (c >= 'a' && c <= 'f') nibble = c - 'a' + 10;
+        else return false;
+        val = (val << 4) | nibble;
+    }
+    *out = val;
+    return true;
+}
+
 #define panel_display_message_checksum CHECKSUM("display_message")
 #define panel_checksum             CHECKSUM("panel")
 
@@ -65,6 +96,24 @@ void GcodeDispatch::on_console_line_received(void *line)
     if(possible_command.empty()) {
         new_message.stream->printf("ok\r\n");
         return;
+    }
+
+    // CRC16 verification: if command ends with *XXXX (4 hex chars), verify and strip.
+    // Auto-detect: commands without * are processed normally (backward compatible).
+    {
+        size_t len = possible_command.length();
+        if (len >= 5 && possible_command[len - 5] == '*') {
+            uint16_t received_crc;
+            if (parse_hex16(possible_command.c_str() + len - 4, &received_crc)) {
+                string payload = possible_command.substr(0, len - 5);
+                uint16_t computed_crc = crc16((const uint8_t*)payload.c_str(), payload.length());
+                if (received_crc != computed_crc) {
+                    new_message.stream->printf("rs\n");
+                    return;
+                }
+                possible_command = payload;
+            }
+        }
     }
 
 try_again:

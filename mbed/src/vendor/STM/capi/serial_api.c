@@ -57,7 +57,7 @@ static void init_uart(serial_t *obj)
     UartHandle.Init.WordLength = obj->databits;
     UartHandle.Init.StopBits   = obj->stopbits;
     UartHandle.Init.Parity     = obj->parity;
-    UartHandle.Init.HwFlowCtl  = obj->hw_flowcontrol;
+    UartHandle.Init.HwFlowCtl  = UART_HWCONTROL_NONE;
 
     if (obj->pin_rx == NC) {
         UartHandle.Init.Mode = UART_MODE_TX;
@@ -72,7 +72,7 @@ static void init_uart(serial_t *obj)
     }
 }
 
-void serial_init(serial_t *obj, PinName tx, PinName rx, PinName rts, PinName cts)
+void serial_init(serial_t *obj, PinName tx, PinName rx)
 {
     // Determine the UART to use (UART_1, UART_2, ...)
     UARTName uart_tx = (UARTName)pinmap_peripheral(tx, PinMap_UART_TX);
@@ -86,12 +86,10 @@ void serial_init(serial_t *obj, PinName tx, PinName rx, PinName rts, PinName cts
     switch (obj->uart) {
         case UART_1:
             __HAL_RCC_USART1_CLK_ENABLE();
-            __DMA2_CLK_ENABLE(); 
             obj->index = 0;
             break;
         case UART_2:
             __HAL_RCC_USART2_CLK_ENABLE();
-            __DMA1_CLK_ENABLE(); 
             obj->index = 1;
             break;
 #if defined(USART3_BASE)
@@ -142,17 +140,6 @@ void serial_init(serial_t *obj, PinName tx, PinName rx, PinName rts, PinName cts
         pin_mode(rx, PullUp);
     }
 
-    if (rts != NC) {
-        pin_function( rts, STM_PIN_DATA(STM_MODE_OUTPUT_PP, GPIO_NOPULL, 0));   // In DMA mode, we set RTS output as discrete GPIO, and handle by software to deal with crappy usb-serial devices inability to do correct (prompt) rts hs.
-    }
-    if (cts != NC) {
-        pinmap_pinout(cts, PinMap_UART_CTS);
-		pin_mode(cts, PullUp );
-		obj->hw_flowcontrol = UART_HWCONTROL_CTS;
-	} else {
-		obj->hw_flowcontrol = UART_HWCONTROL_NONE;
-	}
-		
     // Configure UART
     obj->baudrate = 9600;
     obj->databits = UART_WORDLENGTH_8B;
@@ -275,33 +262,6 @@ void serial_format(serial_t *obj, int data_bits, SerialParity parity, int stop_b
 /******************************************************************************
  * INTERRUPTS HANDLING
  ******************************************************************************/
-static void dma1_irq( void )
-{
-    if ( DMA1->HISR & DMA_HISR_TCIF5 )
-    {
-        irq_handler(serial_irq_ids[1], DmaTCIrq);
-    }
-    if ( DMA1->HISR & DMA_HISR_HTIF5 )
-    {
-        irq_handler(serial_irq_ids[1], DmaHFIrq);
-    }
-    
-    DMA1->HIFCR |= DMA_HISR_TCIF5 | DMA_HISR_HTIF5 | DMA_HISR_TEIF5 | DMA_HISR_DMEIF5 | DMA_HISR_FEIF5;    
-}
-
-static void dma2_irq( void )
-{
-    if ( DMA2->LISR & DMA_LISR_TCIF2 )
-    {
-        irq_handler(serial_irq_ids[0], DmaTCIrq);
-    }
-    if ( DMA2->LISR & DMA_LISR_HTIF2 )
-    {
-        irq_handler(serial_irq_ids[0], DmaHFIrq);
-    }
-    
-    DMA2->LIFCR |= DMA_LISR_TCIF2 | DMA_LISR_HTIF2 | DMA_LISR_TEIF2 | DMA_LISR_DMEIF2 | DMA_LISR_FEIF2;    
-}
 
 static void uart_irq(UARTName name, int id)
 {
@@ -314,10 +274,6 @@ static void uart_irq(UARTName name, int id)
         if (__HAL_UART_GET_FLAG(&UartHandle, UART_FLAG_RXNE) != RESET) {
             irq_handler(serial_irq_ids[id], RxIrq);
             __HAL_UART_CLEAR_FLAG(&UartHandle, UART_FLAG_RXNE);
-        }
-        if (__HAL_UART_GET_FLAG(&UartHandle, UART_FLAG_IDLE) != RESET) {
-            __HAL_UART_CLEAR_IDLEFLAG(&UartHandle);
-            irq_handler(serial_irq_ids[id], RxIdleIrq);
         }
     }
 }
@@ -374,46 +330,6 @@ static void uart8_irq(void)
 }
 #endif
 
-void serial_activate_rxdma(serial_t *obj, unsigned char* rx_buffer, int len )
-{
-	switch (obj->uart) {
-		case UART_1:
-		    // Clear /half/complete/ flags, in the event they are set..
-            DMA2->LIFCR |= DMA_LISR_TCIF2 | DMA_LISR_HTIF2 | DMA_LISR_TEIF2 | DMA_LISR_DMEIF2 | DMA_LISR_FEIF2;
-
-            DMA2_Stream2->NDTR = len;
-            DMA2_Stream2->PAR = (uint32_t)&(USART1->DR);
-            DMA2_Stream2->M0AR = (uint32_t)rx_buffer;
-		
-            DMA2_Stream2->CR = (0x4 << DMA_SxCR_CHSEL_Pos) | DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_PL_0 | DMA_SxCR_CIRC | DMA_SxCR_HTIE | DMA_SxCR_TCIE; // DMA FIFO is not enabled, to make things easier.
-		
-            USART1->SR &= ~USART_SR_IDLE;
-
-            DMA2_Stream2->CR |= DMA_SxCR_EN;
-            USART1->CR3 |= USART_CR3_DMAR;
-            break;
-		    
-        case UART_2:
-		    // Clear /half/complete/ flags, in the event they are set..
-            DMA1->HIFCR |= DMA_HISR_TCIF5 | DMA_HISR_HTIF5 | DMA_HISR_TEIF5 | DMA_HISR_DMEIF5 | DMA_HISR_FEIF5;
-
-            DMA1_Stream5->NDTR = len;
-            DMA1_Stream5->PAR = (uint32_t)&(USART2->DR);
-            DMA1_Stream5->M0AR = (uint32_t)rx_buffer;
-		
-            DMA1_Stream5->CR = (0x4 << DMA_SxCR_CHSEL_Pos) | DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_PL_0 | DMA_SxCR_CIRC | DMA_SxCR_HTIE | DMA_SxCR_TCIE; // DMA FIFO is not enabled, to make things easier.
-		
-            USART2->SR &= ~USART_SR_IDLE;
-
-            DMA1_Stream5->CR |= DMA_SxCR_EN;
-            USART2->CR3 |= USART_CR3_DMAR;
-            break;
-
-		default:
-		    break;
-    }
-}
-
 void serial_irq_handler(serial_t *obj, uart_irq_handler handler, uint32_t id)
 {
     irq_handler = handler;
@@ -422,8 +338,8 @@ void serial_irq_handler(serial_t *obj, uart_irq_handler handler, uint32_t id)
 
 void serial_irq_set(serial_t *obj, SerialIrq irq, uint32_t enable)
 {
-    IRQn_Type irq_n = (IRQn_Type)0, dma_irq_n = (IRQn_Type)0;
-    uint32_t vector = 0, dma_vector = 0;
+    IRQn_Type irq_n = (IRQn_Type)0;
+    uint32_t vector = 0;
 
     UartHandle.Instance = (USART_TypeDef *)(obj->uart);
 
@@ -431,15 +347,11 @@ void serial_irq_set(serial_t *obj, SerialIrq irq, uint32_t enable)
         case UART_1:
             irq_n = USART1_IRQn;
             vector = (uint32_t)&uart1_irq;
-            dma_vector= ((uint32_t)&dma2_irq);
-            dma_irq_n = DMA2_Stream2_IRQn;
             break;
 
         case UART_2:
             irq_n = USART2_IRQn;
             vector = (uint32_t)&uart2_irq;
-            dma_vector= ((uint32_t)&dma1_irq);
-            dma_irq_n = DMA1_Stream5_IRQn;
             break;
 #if defined(USART3_BASE)
         case UART_3:
@@ -481,55 +393,30 @@ void serial_irq_set(serial_t *obj, SerialIrq irq, uint32_t enable)
 
     if (enable) {
 
-        switch (irq) {
-            case RxIrq:
-                __HAL_UART_ENABLE_IT(&UartHandle, UART_IT_RXNE);
-                break;
-                
-            case TxIrq:
-                __HAL_UART_ENABLE_IT(&UartHandle, UART_IT_TXE);
-                break;
-                
-            case RxIdleIrq:
-                __HAL_UART_ENABLE_IT(&UartHandle, UART_IT_IDLE);
-                break;
+        if (irq == RxIrq) {
+            __HAL_UART_ENABLE_IT(&UartHandle, UART_IT_RXNE);
+        } else { // TxIrq
+            __HAL_UART_ENABLE_IT(&UartHandle, UART_IT_TC);
+        }
 
-            case DmaTCIrq:
-            case DmaHFIrq:
-                break;
-        }
-        if (dma_vector) {
-            NVIC_SetVector(dma_irq_n, dma_vector);
-            NVIC_EnableIRQ(dma_irq_n);
-        }
-        
         NVIC_SetVector(irq_n, vector);
         NVIC_EnableIRQ(irq_n);
 
     } else { // disable
 
-        switch (irq)
-        {
-            case RxIrq:
-                __HAL_UART_DISABLE_IT(&UartHandle, UART_IT_RXNE);
-                break;
-                
-            case TxIrq:
-                __HAL_UART_DISABLE_IT(&UartHandle, UART_IT_TXE);
-                break;
-                
-            case RxIdleIrq:
-                __HAL_UART_DISABLE_IT(&UartHandle, UART_IT_IDLE);
-                break;
-            case DmaTCIrq:
-            case DmaHFIrq:
-                break;
+        int all_disabled = 0;
+
+        if (irq == RxIrq) {
+            __HAL_UART_DISABLE_IT(&UartHandle, UART_IT_RXNE);
+            // Check if TxIrq is disabled too
+            if ((UartHandle.Instance->CR1 & USART_CR1_TXEIE) == 0) all_disabled = 1;
+        } else { // TxIrq
+            __HAL_UART_DISABLE_IT(&UartHandle, UART_IT_TXE);
+            // Check if RxIrq is disabled too
+            if ((UartHandle.Instance->CR1 & USART_CR1_RXNEIE) == 0) all_disabled = 1;
         }
 
-        
-        if ( !(UartHandle.Instance->CR1 & (USART_CR1_RXNEIE | USART_CR1_TXEIE | USART_CR1_IDLEIE)) )  { // All disabled?
-            NVIC_DisableIRQ(irq_n);
-        }
+        if (all_disabled) NVIC_DisableIRQ(irq_n);
 
     }
 }
@@ -550,110 +437,6 @@ void serial_putc(serial_t *obj, int c)
     USART_TypeDef *uart = (USART_TypeDef *)(obj->uart);
     while (!serial_writable(obj));
     uart->DR = (uint32_t)(c & 0x1FF);
-}
-
-void serial_send_string( serial_t *obj, const char *str )
-{
-    USART_TypeDef *uart = (USART_TypeDef *)(obj->uart);
-    int len = strlen(str);
-    unsigned int strInFlash = ((unsigned)str >= FLASH_BASE && (unsigned)str < FLASH_END);	// true if str points into flash memory
-    unsigned int nSend;	// number of bytes to send
-    const char * pSend;	// pointer to data to send, either str or obj->dmxtxbuffer, depending on strInFlash state
-    
-    switch (obj->uart) {
-    	case UART_1:
-    		do {
-                // wait for end of active dma operation
-                if (DMA2_Stream7->CR & DMA_SxCR_EN) {
-                    while (! (DMA2->HISR & DMA_HISR_TCIF7))
-                        ;
-                    DMA2_Stream7->CR &= ~DMA_SxCR_EN;
-                    uart->CR3 &= ~USART_CR3_DMAT;
-                }
-
-                // Clear /half/complete/ flags from last tx..
-                DMA2->HIFCR |= DMA_HISR_TCIF7 | DMA_HISR_HTIF7;
-
-                if(DMA2->HISR & (DMA_HISR_TEIF7 | DMA_HISR_DMEIF7 | DMA_HISR_FEIF7 )) { // error on DMA
-                    DMA2->HIFCR |= (DMA_HISR_TEIF7 | DMA_HISR_DMEIF7 | DMA_HISR_FEIF7 ); // should never happen.
-                }
-
-				if (strInFlash) {
-				    // send all data directly
-				    pSend = str;
-				    nSend = len;
-				} else {
-                    // copy as much data as possible into dmatxbuffer
-			        nSend = len;
-			        if (nSend > sizeof(obj->dmatxbuffer))
-			            nSend = sizeof(obj->dmatxbuffer);
-			        memcpy(obj->dmatxbuffer, str, nSend);
-			        pSend = obj->dmatxbuffer;
-			    }
-		        str += nSend;
-		        len -= nSend;
-
-                DMA2_Stream7->NDTR = nSend;
-                DMA2_Stream7->PAR = (uint32_t)&(uart->DR);
-                DMA2_Stream7->M0AR = (uint32_t)pSend;
-                DMA2_Stream7->FCR |= DMA_SxFCR_DMDIS;
-
-                DMA2_Stream7->CR = (0x4 << DMA_SxCR_CHSEL_Pos) | DMA_SxCR_MINC | DMA_SxCR_DIR_0 | DMA_SxCR_PL_1 | DMA_SxCR_MSIZE_1;
-
-                uart->SR &= ~USART_SR_TC;
-
-                DMA2_Stream7->CR |= DMA_SxCR_EN;
-                uart->CR3 |= USART_CR3_DMAT;
-            } while (len > 0);
-		    break;
-
-    	case UART_2:
-    		do {
-                // wait for end of active dma operation
-                if (DMA1_Stream6->CR & DMA_SxCR_EN) {
-                    while (!(DMA1->HISR & DMA_HISR_TCIF6))
-                        ;
-                    DMA1_Stream6->CR &= ~DMA_SxCR_EN;
-                    uart->CR3 &= ~USART_CR3_DMAT;
-                }
-
-                // Clear /half/complete/ flags from last tx..
-                DMA1->HIFCR |= DMA_HISR_TCIF6 | DMA_HISR_HTIF6;
-
-                if(DMA1->HISR & (DMA_HISR_TEIF6 | DMA_HISR_DMEIF6 | DMA_HISR_FEIF6 )) { // error on DMA
-    	            DMA1->HIFCR |= (DMA_HISR_TEIF6 | DMA_HISR_DMEIF6 | DMA_HISR_FEIF6 ); // should never happen.
-                }
-
-			    // copy as much data as possible into dmatxbuffer
-			    unsigned int n = len;
-			    if (n > sizeof(obj->dmatxbuffer))
-			        n = sizeof(obj->dmatxbuffer);
-			    memcpy(obj->dmatxbuffer, str, n);
-			    str += n;
-			    len -= n;
-
-                DMA1_Stream6->NDTR = len;
-                DMA1_Stream6->PAR = (uint32_t)&(uart->DR);
-                DMA1_Stream6->M0AR = (uint32_t)str;
-                DMA1_Stream6->FCR |= DMA_SxFCR_DMDIS;
-
-                DMA1_Stream6->CR = (0x4 << DMA_SxCR_CHSEL_Pos) | DMA_SxCR_MINC | DMA_SxCR_DIR_0 | DMA_SxCR_PL_1 | DMA_SxCR_MSIZE_1;
-
-                uart->SR &= ~USART_SR_TC;
-
-                DMA1_Stream6->CR |= DMA_SxCR_EN;
-                uart->CR3 |= USART_CR3_DMAT;
-            } while (len > 0);
-		    break;
-		    
-		default:
-		    break;
-    }
-}
-
-int serial_get_dma_buffer_index(serial_t *obj)
-{
-    return DMA2_Stream2->NDTR;
 }
 
 int serial_readable(serial_t *obj)

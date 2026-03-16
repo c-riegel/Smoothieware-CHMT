@@ -559,32 +559,12 @@ void Encoder::on_idle(void *argument)
         }
     }
 
-    // Report segment transitions as they happen
-    if (segment_mode || segments_complete) {
-        int cur = current_segment;
-        while (last_reported_segment < cur - 1) {
-            int i = last_reported_segment + 1;
-            uint32_t dur = segments[i].completed_at - segments[i].armed_at;
-            THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld F=%.0f\n",
-                i, dur,
-                segments[i].x_enc_at_arm, segments[i].x_target,
-                segments[i].y_enc_at_arm, segments[i].y_target,
-                segments[i].feed_rate);
-            last_reported_segment = i;
-        }
-    }
-
     if (segments_complete) {
-        // Report the final segment
-        int i = encoder_segment_count - 1;
-        uint32_t dur = segments[i].completed_at - segments[i].armed_at;
-        THEKERNEL->streams->printf("s%d: dur=%lu xe=%ld/%ld ye=%ld/%ld F=%.0f\n",
-            i, dur,
-            segments[i].x_enc_at_arm, segments[i].x_target,
-            segments[i].y_enc_at_arm, segments[i].y_target,
-            segments[i].feed_rate);
-        THEKERNEL->streams->printf("seg complete: total=%lu us\n",
-            segments[i].completed_at - segments[0].armed_at);
+        int last = encoder_segment_count - 1;
+        THEKERNEL->streams->printf("seg complete: %d segs, total=%lu us, enc x=%ld y=%ld\n",
+            encoder_segment_count,
+            segments[last].completed_at - segments[0].armed_at,
+            get_x_count(), get_y_count());
         segments_complete = false;
 
         // Sync Robot's internal position with actual encoder position.
@@ -608,10 +588,10 @@ void Encoder::on_idle(void *argument)
             float sx = THEROBOT->actuators[0]->get_current_position();
             float sy = THEROBOT->actuators[1]->get_current_position();
             if (segment_mode) {
-                int cs = current_segment;
-                THEKERNEL->streams->printf("st: enc %ld,%ld seg=%d/%d xt=%ld yt=%ld t=%lu\n",
-                    ex, ey, cs, segment_count,
-                    segments[cs].x_target, segments[cs].y_target, now);
+                // No printf during segment execution — real-time motor control
+                // must not be delayed. As-executed data is cached in the segment
+                // struct (armed_at, completed_at, x_enc_at_arm, y_enc_at_arm)
+                // and dumped after segments complete.
             } else if (buffering) {
                 THEKERNEL->streams->printf("st: enc %ld,%ld step %.2f,%.2f BUF %d/%d t=%lu\n",
                     ex, ey, sx, sy, segments_received, segment_count, now);
@@ -722,10 +702,8 @@ void Encoder::on_gcode_received(void *argument)
                 int32_t y_target = has_y ? (int32_t)((gcode->get_value('Y') - y_encoder_offset) * y_counts_per_mm) :
                     (encoder_segments_received > 0 ? segments[encoder_segments_received - 1].y_target : get_y_count());
 
-                // DEBUG: show raw gcode values and computed targets
-                THEKERNEL->streams->printf("ebuf: gX=%.4f gY=%.4f off=%.4f xt=%ld yt=%ld cmd=%s\n",
-                    has_x ? gcode->get_value('X') : 0, has_y ? gcode->get_value('Y') : 0,
-                    x_encoder_offset, x_target, y_target, gcode->get_command());
+                // Debug printf removed — blocking serial TX during segment buffering
+                // causes incoming character drops. Re-enable only with DMA TX.
 
                 // Per-axis minimum delta check: if the move on an axis is smaller
                 // than MIN_ENCODER_DELTA counts, don't encoder-control that axis.
@@ -786,10 +764,10 @@ void Encoder::on_gcode_received(void *argument)
                     precompute_segment_timeouts();
 
                     int last = encoder_segment_count - 1;
-                    THEKERNEL->streams->printf("seg recv: %d enc x=%ld y=%ld s0:xt=%ld,yt=%ld s%d:xt=%ld,yt=%ld t=%lu\n",
+                    THEKERNEL->streams->printf("seg recv: %d enc x=%ld y=%ld s0:xt=%ld,yt=%ld,F=%.0f s%d:xt=%ld,yt=%ld,F=%.0f t=%lu\n",
                         encoder_segment_count, get_x_count(), get_y_count(),
-                        segments[0].x_target, segments[0].y_target,
-                        last, segments[last].x_target, segments[last].y_target,
+                        segments[0].x_target, segments[0].y_target, segments[0].feed_rate,
+                        last, segments[last].x_target, segments[last].y_target, segments[last].feed_rate,
                         us_ticker_read());
 
                     segment_mode = true;
@@ -804,15 +782,10 @@ void Encoder::on_gcode_received(void *argument)
             // DON'T return — let the (stripped) G1 pass through to Robot/Planner
             // so Z/A/B/C/D axes are handled by the normal planner.
 
-        } else if (!segment_mode) {
-            // Normal single-move mode (not buffering)
-            int32_t x_target = (int32_t)((THEROBOT->get_axis_position(X_AXIS) - x_encoder_offset) * x_counts_per_mm);
-            int32_t y_target = (int32_t)((THEROBOT->get_axis_position(Y_AXIS) - y_encoder_offset) * y_counts_per_mm);
-            // Only arm encoder target if the move exceeds the minimum delta.
-            // Smaller moves can't be reliably detected and would cause a timeout.
-            if (has_x && abs(x_target - get_x_count()) >= MIN_ENCODER_DELTA) arm_x_target(x_target);
-            if (has_y && abs(y_target - get_y_count()) >= MIN_ENCODER_DELTA) arm_y_target(y_target);
         }
+        // Single-move encoder arming disabled — all encoder control goes through
+        // M920 segment batches. Non-M920 G1 commands (including degraded moves
+        // from interpolation failure) use the planner only.
         // DON'T return — let G1 pass through to Robot/Planner for stepping.
         // In buffering mode, X/Y are stripped so planner handles Z/A/B/C/D only.
         // In single-move mode, planner handles all axes alongside encoder detection.

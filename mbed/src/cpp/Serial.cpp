@@ -19,8 +19,8 @@
 
 namespace mbed {
 
-Serial::Serial(PinName tx, PinName rx, PinName rts, PinName cts, const char *name) : Stream(name) {
-    serial_init(&_serial, tx, rx, rts, cts);
+Serial::Serial(PinName tx, PinName rx, const char *name) : Stream(name) {
+    serial_init(&_serial, tx, rx);
     serial_irq_handler(&_serial, Serial::_irq_handler, (uint32_t)this);
 }
 
@@ -36,13 +36,6 @@ int Serial::readable() {
     return serial_readable(&_serial);
 }
 
-int Serial::getrx() {
-    return serial_getc(&_serial);
-}
-
-int Serial::get_dma_buffer_index() {
-    return serial_get_dma_buffer_index(&_serial);
-}
 
 int Serial::writeable() {
     return serial_writable(&_serial);
@@ -57,9 +50,6 @@ void Serial::attach(void (*fptr)(void), IrqType type) {
     }
 }
 
-void Serial::dma_init( unsigned char* rx_buffer, int len ) {
-    serial_activate_rxdma(&_serial, rx_buffer, len);
-}
 
 void Serial::_irq_handler(uint32_t id, SerialIrq irq_type) {
     Serial *handler = (Serial*)id;
@@ -73,12 +63,6 @@ int Serial::_getc() {
 int Serial::_putc(int c) {
     serial_putc(&_serial, c);
     return c;
-}
-
-void Serial::send_string(const char *s)
-{
-	serial_send_string(&_serial, s);
-    return;
 }
 
 } // namespace mbed

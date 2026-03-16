@@ -5,6 +5,7 @@
 
 #define MAX_ENCODER_SEGMENTS 128
 #define MIN_ENCODER_DELTA 10       // minimum encoder counts per axis to arm encoder target
+#define MAX_STEP_VELOCITY_CHANGE 50.0f  // max mm/s speed change between consecutive encoder segments
 
 class StreamOutput;
 class Gcode;

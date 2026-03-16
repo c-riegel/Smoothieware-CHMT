@@ -108,10 +108,24 @@ void GcodeDispatch::on_console_line_received(void *line)
                 string payload = possible_command.substr(0, len - 5);
                 uint16_t computed_crc = crc16((const uint8_t*)payload.c_str(), payload.length());
                 if (received_crc != computed_crc) {
-                    new_message.stream->printf("rs\n");
+                    // Include line number in rs response if present (N<seq> prefix)
+                    if (payload.length() > 1 && payload[0] == 'N') {
+                        int ln = strtol(payload.c_str() + 1, nullptr, 10);
+                        new_message.stream->printf("rs N%d\n", ln);
+                    } else {
+                        new_message.stream->printf("rs\n");
+                    }
                     return;
                 }
                 possible_command = payload;
+                // Strip N<seq> prefix so Smoothieware's N-line handler doesn't
+                // enforce its own sequence tracking (which conflicts with ours).
+                if (possible_command.length() > 1 && possible_command[0] == 'N') {
+                    size_t space = possible_command.find(' ');
+                    if (space != string::npos) {
+                        possible_command = possible_command.substr(space + 1);
+                    }
+                }
             }
         }
     }

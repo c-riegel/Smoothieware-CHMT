@@ -735,6 +735,23 @@ void Encoder::on_gcode_received(void *argument)
                     if (dist > 0.001f) {
                         float x_speed = feed_mmps * fabsf(dx_mm) / dist;
                         float y_speed = feed_mmps * fabsf(dy_mm) / dist;
+                        // Safety clamp to axis max rate
+                        float x_max = x_stepper->get_max_rate();
+                        float y_max = y_stepper->get_max_rate();
+                        if (x_speed > x_max) x_speed = x_max;
+                        if (y_speed > y_max) y_speed = y_max;
+                        // Safety clamp velocity change between consecutive segments
+                        if (encoder_segments_received > 0) {
+                            // Recover previous speed from stored steps_per_tick
+                            float prev_xr = (float)((double)segments[encoder_segments_received - 1].x_steps_per_tick / (double)STEPTICKER_FPSCALE * (double)tick_freq / (double)x_stepper->get_steps_per_mm());
+                            float prev_yr = (float)((double)segments[encoder_segments_received - 1].y_steps_per_tick / (double)STEPTICKER_FPSCALE * (double)tick_freq / (double)y_stepper->get_steps_per_mm());
+                            bool clamped = false;
+                            if (x_speed > prev_xr + MAX_STEP_VELOCITY_CHANGE) { x_speed = prev_xr + MAX_STEP_VELOCITY_CHANGE; clamped = true; }
+                            if (y_speed > prev_yr + MAX_STEP_VELOCITY_CHANGE) { y_speed = prev_yr + MAX_STEP_VELOCITY_CHANGE; clamped = true; }
+                            if (clamped) {
+                                THEKERNEL->streams->printf("dv clamp s%d: xs=%.1f ys=%.1f\n", encoder_segments_received, x_speed, y_speed);
+                            }
+                        }
                         segments[encoder_segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
                         segments[encoder_segments_received].y_steps_per_tick = (int64_t)round(((double)(y_speed * y_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
                     } else {

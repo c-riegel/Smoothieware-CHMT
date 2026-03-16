@@ -126,6 +126,7 @@ void GcodeDispatch::on_console_line_received(void *line)
                         possible_command = possible_command.substr(space + 1);
                     }
                 }
+                // CRC16 verified and N-line stripped — command is ready for processing
             }
         }
     }

@@ -567,14 +567,7 @@ void Encoder::on_idle(void *argument)
             get_x_count(), get_y_count());
         segments_complete = false;
 
-        // Sync Robot's internal position with actual encoder position.
-        // The planner may have been processing Z/A/B/C/D blocks concurrently,
-        // so only sync X/Y from encoders, preserve Z from planner.
-        float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
-        float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
-        float current_z = THEROBOT->get_axis_position(Z_AXIS);
-        THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
-        // Queue is NOT held in the blending architecture — no release needed.
+        // Position sync handled by continuous sync in on_idle (below).
     }
 
     // Periodic status: during segment execution or armed single moves (not during buffering — serial conflict)
@@ -645,6 +638,16 @@ void Encoder::on_idle(void *argument)
                 THEKERNEL->call_event(ON_HALT, nullptr);
             }
         }
+    }
+
+    // Continuous encoder sync: whenever the conveyor is idle and no encoder
+    // segments are running, keep Robot's position matched to encoder reality.
+    // This ensures correct position after ANY move (planner, degraded, legacy).
+    if (!segment_mode && !buffering && x_counts_per_mm != 0 && THECONVEYOR->is_idle()) {
+        float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
+        float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
+        float current_z = THEROBOT->get_axis_position(Z_AXIS);
+        THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
     }
 }
 
@@ -749,7 +752,7 @@ void Encoder::on_gcode_received(void *argument)
                             if (x_speed > prev_xr + MAX_STEP_VELOCITY_CHANGE) { x_speed = prev_xr + MAX_STEP_VELOCITY_CHANGE; clamped = true; }
                             if (y_speed > prev_yr + MAX_STEP_VELOCITY_CHANGE) { y_speed = prev_yr + MAX_STEP_VELOCITY_CHANGE; clamped = true; }
                             if (clamped) {
-                                THEKERNEL->streams->printf("dv clamp s%d: xs=%.1f ys=%.1f\n", encoder_segments_received, x_speed, y_speed);
+                                // dv clamp fired (silent — printf during buffering causes crashes)
                             }
                         }
                         segments[encoder_segments_received].x_steps_per_tick = (int64_t)round(((double)(x_speed * x_stepper->get_steps_per_mm()) / (double)tick_freq) * (double)STEPTICKER_FPSCALE);
@@ -781,15 +784,11 @@ void Encoder::on_gcode_received(void *argument)
                     precompute_segment_timeouts();
 
                     int last = encoder_segment_count - 1;
-                    THEKERNEL->streams->printf("seg recv: %d enc x=%ld y=%ld s0:xt=%ld,yt=%ld,F=%.0f s%d:xt=%ld,yt=%ld,F=%.0f t=%lu\n",
-                        encoder_segment_count, get_x_count(), get_y_count(),
-                        segments[0].x_target, segments[0].y_target, segments[0].feed_rate,
-                        last, segments[last].x_target, segments[last].y_target, segments[last].feed_rate,
-                        us_ticker_read());
+                    // seg recv silent — printf during buffering causes crashes
 
                     segment_mode = true;
                     current_segment = 0;
-                    THEKERNEL->streams->printf("arm seg 0 t=%lu\n", us_ticker_read());
+                    // arm seg 0 silent — printf during buffering causes crashes
                     arm_segment(0);
                 }
                 // else: all segments were Z/A/B/C/D only — no encoder work needed.
@@ -871,14 +870,7 @@ void Encoder::on_gcode_received(void *argument)
                 }
 
                 // Position sync: ensure Robot's position matches encoder reality
-                // before computing any targets. Only sync when conveyor is idle —
-                // syncing during an active planner move corrupts the in-flight block.
-                if (THECONVEYOR->is_idle()) {
-                    float actual_x = (float)get_x_count() / x_counts_per_mm + x_encoder_offset;
-                    float actual_y = (float)get_y_count() / y_counts_per_mm + y_encoder_offset;
-                    float current_z = THEROBOT->get_axis_position(Z_AXIS);
-                    THEROBOT->reset_axis_position(actual_x, actual_y, current_z);
-                }
+                // Position sync handled by continuous sync in on_idle.
 
                 segment_count = count;
                 segments_received = 0;
@@ -889,8 +881,7 @@ void Encoder::on_gcode_received(void *argument)
                 pending_acceleration = 0;
                 buffering = true;
                 // DO NOT hold queue — Z/A/B/C/D planner blocks must flow through
-                THEKERNEL->streams->printf("M920: buf %d enc x=%ld y=%ld t=%lu\n",
-                    count, get_x_count(), get_y_count(), us_ticker_read());
+                // M920 buf silent — printf during buffering causes crashes
                 break;
             }
 
